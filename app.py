@@ -128,17 +128,30 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
     return [c.strip() for c in splitter.split_text(text) if len(c.strip()) > 30]
 
 
+def _local_embed(chunks: list) -> list:
+    """本地 sentence-transformers 兜底 — 首次下载 80MB 模型后缓存在 session_state"""
+    from sentence_transformers import SentenceTransformer
+    if "_local_embed_model" not in st.session_state:
+        st.session_state._local_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+    model = st.session_state._local_embed_model
+    return model.encode(chunks, show_progress_bar=False, batch_size=32,
+                        normalize_embeddings=True).tolist()
+
+
 def embed_chunks(chunks: list, api_key: str = None, base_url: str = None, embed_model: str = None) -> list:
-    """智谱 embedding-3 API 向量化 — batch 最多 32 条"""
+    """API 优先 + 本地兜底 — 先试 embedding-3，失败降级本地模型"""
     client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=30)
     vectors = []
     batch_size = 32
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-        resp = client.embeddings.create(model=embed_model or "embedding-3", input=batch)
-        for d in sorted(resp.data, key=lambda x: x.index):
-            vectors.append(d.embedding)
-    return vectors
+    try:
+        for i in range(0, len(chunks), batch_size):
+            batch = chunks[i:i + batch_size]
+            resp = client.embeddings.create(model=embed_model or "embedding-3", input=batch)
+            for d in sorted(resp.data, key=lambda x: x.index):
+                vectors.append(d.embedding)
+        return vectors
+    except Exception:
+        return _local_embed(chunks)
 
 
 def embed_query(text: str, api_key: str = None, base_url: str = None, embed_model: str = None) -> list:
