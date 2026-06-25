@@ -121,14 +121,26 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
 
 
 def embed_chunks(chunks: list, api_key: str, base_url: str, model: str) -> list:
+    """批量向量化，带限流重试"""
+    import time as _time
     client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=30)
     vectors = []
-    batch_size = 20
+    batch_size = 10  # 缩小批次避免限流
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]
-        resp = client.embeddings.create(model=model, input=batch)
-        vectors.extend([d.embedding for d in resp.data])
-        time.sleep(0.3)
+        for attempt in range(3):  # 最多重试 3 次
+            try:
+                resp = client.embeddings.create(model=model, input=batch)
+                vectors.extend([d.embedding for d in resp.data])
+                break
+            except openai.RateLimitError:
+                if attempt < 2:
+                    _time.sleep(3 * (attempt + 1))  # 3s, 6s 退避
+                else:
+                    raise
+            except Exception:
+                raise
+        _time.sleep(0.5)  # 批次间隔
     return vectors
 
 
