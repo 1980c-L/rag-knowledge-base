@@ -120,28 +120,19 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
     return [c.strip() for c in splitter.split_text(text) if len(c.strip()) > 30]
 
 
-def embed_chunks(chunks: list, api_key: str, base_url: str, model: str) -> list:
-    """批量向量化，带限流重试"""
-    import time as _time
-    client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=30)
-    vectors = []
-    batch_size = 10  # 缩小批次避免限流
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i + batch_size]
-        for attempt in range(3):  # 最多重试 3 次
-            try:
-                resp = client.embeddings.create(model=model, input=batch)
-                vectors.extend([d.embedding for d in resp.data])
-                break
-            except openai.RateLimitError:
-                if attempt < 2:
-                    _time.sleep(3 * (attempt + 1))  # 3s, 6s 退避
-                else:
-                    raise
-            except Exception:
-                raise
-        _time.sleep(0.5)  # 批次间隔
-    return vectors
+def embed_chunks(chunks: list, api_key: str = None, base_url: str = None, model: str = None) -> list:
+    """本地 sentence-transformers 向量化，无需 API"""
+    from sentence_transformers import SentenceTransformer
+    import numpy as np
+
+    # 首次加载缓存
+    if "embed_model" not in st.session_state:
+        with st.spinner("加载嵌入模型（首次约 30 秒）…"):
+            st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    model_obj = st.session_state.embed_model
+    vectors = model_obj.encode(chunks, show_progress_bar=False, batch_size=32)
+    return vectors.tolist()
 
 
 # ═══════════════════════════════════════════════════════
@@ -213,7 +204,7 @@ class KnowledgeBase:
 
         # 必须有 api_key 才能重新向量化，否则只清索引（下次查询时报错提示）
         if api_key and chunks:
-            vectors = embed_chunks(chunks, api_key, base_url, embed_model)
+            vectors = embed_chunks(chunks)
             dim = len(vectors[0])
             index = faiss.IndexFlatIP(dim)
             arr = np.array(vectors, dtype="float32")
@@ -231,7 +222,7 @@ class KnowledgeBase:
             return []
 
         index = faiss.read_index(str(self.faiss_file))
-        qv = embed_chunks([query], api_key, base_url, embed_model)[0]
+        qv = embed_chunks([query])[0]
         q_arr = np.array([qv], dtype="float32")
         faiss.normalize_L2(q_arr)
 
