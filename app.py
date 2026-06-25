@@ -129,14 +129,17 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
 
 
 def embed_chunks(chunks: list, api_key: str = None, base_url: str = None, embed_model: str = None) -> list:
-    """本地 sentence-transformers 向量化，无需 API"""
+    """本地 sentence-transformers 向量化"""
     from sentence_transformers import SentenceTransformer
 
     if "embed_model" not in st.session_state:
         st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
     model_obj = st.session_state.embed_model
-    vectors = model_obj.encode(chunks, show_progress_bar=False, batch_size=32)
+    vectors = model_obj.encode(
+        chunks, show_progress_bar=False, batch_size=32,
+        normalize_embeddings=True,  # 返回已归一化向量，省去 FAISS normalize 步骤
+    )
     return vectors.tolist()
 
 
@@ -166,8 +169,17 @@ class KnowledgeBase:
             st.session_state[cache_key] = faiss.read_index(str(self.faiss_file))
         return st.session_state.get(cache_key)
 
-    def _invalidate_faiss_cache(self):
+    def _get_meta_cached(self):
+        """获取元数据（内存缓存，避免每次搜索读磁盘）"""
+        cache_key = f"_meta_{self.name}"
+        if cache_key not in st.session_state:
+            st.session_state[cache_key] = self._load_meta()
+        return st.session_state[cache_key]
+
+    def _invalidate_cache(self):
+        """刷新 FAISS + meta 内存缓存"""
         st.session_state.pop(f"_faiss_{self.name}", None)
+        st.session_state.pop(f"_meta_{self.name}", None)
 
     def add(self, filename: str, file_bytes: bytes, api_key: str, base_url: str, embed_model: str):
         import numpy as np, faiss
@@ -189,7 +201,7 @@ class KnowledgeBase:
 
         # 持久化 FAISS
         faiss.write_index(index, str(self.faiss_file))
-        self._invalidate_faiss_cache()  # 刷新缓存
+        self._invalidate_cache()  # 刷新缓存
 
         # 保存 chunk 元数据（带文件名）
         meta = self._load_meta()
@@ -217,6 +229,7 @@ class KnowledgeBase:
         else:
             self.faiss_file.unlink(missing_ok=True)
             self._save_meta([])
+            self._invalidate_cache()
         return len(removed)
 
     def _rebuild_index(self, meta: list, api_key: str, base_url: str, embed_model: str):
@@ -236,9 +249,10 @@ class KnowledgeBase:
         elif not chunks:
             self.faiss_file.unlink(missing_ok=True)
         self._save_meta(meta)
+        self._invalidate_cache()
 
     def search(self, query: str, top_k: int = 5) -> list:
-        meta = self._load_meta()
+        meta = self._get_meta_cached()
         index = self._get_faiss()
         if not meta or index is None:
             return []
@@ -263,7 +277,7 @@ class KnowledgeBase:
 
     def list_docs(self) -> list:
         from collections import Counter
-        meta = self._load_meta()
+        meta = self._get_meta_cached()
         counts = Counter(m["filename"] for m in meta)
         return [
             {"filename": fname, "chunks": cnt}
@@ -271,7 +285,7 @@ class KnowledgeBase:
         ]
 
     def stats(self) -> dict:
-        meta = self._load_meta()
+        meta = self._get_meta_cached()
         return {
             "doc_count": len(set(m["filename"] for m in meta)),
             "chunk_count": len(meta),
