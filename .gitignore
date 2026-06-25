@@ -1,3 +1,4 @@
 knowledge_bases/
 .env
 __pycache__/
+*.txt
