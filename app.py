@@ -120,19 +120,21 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
     return [c.strip() for c in splitter.split_text(text) if len(c.strip()) > 30]
 
 
-def embed_chunks(chunks: list, api_key: str = None, base_url: str = None, model: str = None) -> list:
+def embed_chunks(chunks: list) -> list:
     """本地 sentence-transformers 向量化，无需 API"""
     from sentence_transformers import SentenceTransformer
-    import numpy as np
 
-    # 首次加载缓存
     if "embed_model" not in st.session_state:
-        with st.spinner("加载嵌入模型（首次约 30 秒）…"):
-            st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+        st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
     model_obj = st.session_state.embed_model
     vectors = model_obj.encode(chunks, show_progress_bar=False, batch_size=32)
     return vectors.tolist()
+
+
+def embed_query(text: str) -> list:
+    """单条查询向量化（复用模型缓存）"""
+    return embed_chunks([text])[0]
 
 
 # ═══════════════════════════════════════════════════════
@@ -146,6 +148,19 @@ class KnowledgeBase:
         self.faiss_file = self.dir / "index.faiss"
         self.meta_file = self.dir / "index.json"
 
+    def _get_faiss(self):
+        """获取 FAISS 索引（内存缓存）"""
+        cache_key = f"_faiss_{self.name}"
+        if cache_key not in st.session_state or not self.faiss_file.exists():
+            return None
+        if st.session_state.get(cache_key) is None and self.faiss_file.exists():
+            import faiss
+            st.session_state[cache_key] = faiss.read_index(str(self.faiss_file))
+        return st.session_state.get(cache_key)
+
+    def _invalidate_faiss_cache(self):
+        st.session_state.pop(f"_faiss_{self.name}", None)
+
     def add(self, filename: str, file_bytes: bytes, api_key: str, base_url: str, embed_model: str):
         import numpy as np
         text = parse_document(file_bytes, filename)
@@ -154,9 +169,9 @@ class KnowledgeBase:
 
         # 加载已有 FAISS 索引
         dim = len(vectors[0])
-        if self.faiss_file.exists():
-            import faiss
-            index = faiss.read_index(str(self.faiss_file))
+        existing = self._get_faiss()
+        if existing is not None:
+            index = existing
         else:
             import faiss
             index = faiss.IndexFlatIP(dim)
@@ -168,6 +183,7 @@ class KnowledgeBase:
         # 持久化 FAISS
         import faiss
         faiss.write_index(index, str(self.faiss_file))
+        self._invalidate_faiss_cache()  # 刷新缓存
 
         # 保存 chunk 元数据（带文件名）
         meta = self._load_meta()
@@ -215,14 +231,14 @@ class KnowledgeBase:
             self.faiss_file.unlink(missing_ok=True)
         self._save_meta(meta)
 
-    def search(self, query: str, api_key: str, base_url: str, embed_model: str, top_k: int = 5) -> list:
-        import faiss, numpy as np
+    def search(self, query: str, top_k: int = 5) -> list:
         meta = self._load_meta()
-        if not meta or not self.faiss_file.exists():
+        index = self._get_faiss()
+        if not meta or index is None:
             return []
 
-        index = faiss.read_index(str(self.faiss_file))
-        qv = embed_chunks([query])[0]
+        import faiss, numpy as np
+        qv = embed_query(query)
         q_arr = np.array([qv], dtype="float32")
         faiss.normalize_L2(q_arr)
 
@@ -386,7 +402,7 @@ if stats["doc_count"] > 0:
                     placeholder = st.empty()
                     placeholder.markdown("🔍 检索中…")
 
-                    results = kb.search(prompt, api_key, cfg["base_url"], cfg["embed_model"])
+                    results = kb.search(prompt)
                     if results:
                         context_parts = []
                         sources = {}
