@@ -128,12 +128,16 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
     return [c.strip() for c in splitter.split_text(text) if len(c.strip()) > 30]
 
 
-def _local_embed(chunks: list) -> list:
-    """本地 sentence-transformers 兜底 — 首次下载 80MB 模型后缓存在 session_state"""
+@st.cache_resource
+def _load_local_model():
+    """加载本地 embedding 模型 — cache_resource 冷启动复用，不重复下载"""
     from sentence_transformers import SentenceTransformer
-    if "_local_embed_model" not in st.session_state:
-        st.session_state._local_embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    model = st.session_state._local_embed_model
+    return SentenceTransformer("paraphrase-MiniLM-L3-v2")
+
+
+def _local_embed(chunks: list) -> list:
+    """本地 sentence-transformers 兜底（40MB L3 模型，比 L6 快一倍）"""
+    model = _load_local_model()
     return model.encode(chunks, show_progress_bar=False, batch_size=32,
                         normalize_embeddings=True).tolist()
 
@@ -262,7 +266,7 @@ class KnowledgeBase:
         self._save_meta(meta)
         self._invalidate_cache()
 
-    def search(self, query: str, api_key: str = None, base_url: str = None, embed_model: str = None, top_k: int = 5) -> list:
+    def search(self, query: str, api_key: str = None, base_url: str = None, embed_model: str = None, top_k: int = 4) -> list:
         meta = self._get_meta_cached()
         index = self._get_faiss()
         if not meta or index is None:
@@ -440,7 +444,7 @@ if stats["doc_count"] > 0:
                         for r in results:
                             fname = r["filename"]
                             sources[fname] = sources.get(fname, 0) + 1
-                            context_parts.append(f"[{r['score']:.2f} | {fname}]\n{r['content'][:600]}")
+                            context_parts.append(f"[{r['score']:.2f} | {fname}]\n{r['content'][:400]}")
                         context = "\n\n---\n\n".join(context_parts)
                         source_note = True
                     else:
