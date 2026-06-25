@@ -129,23 +129,21 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
 
 
 def embed_chunks(chunks: list, api_key: str = None, base_url: str = None, embed_model: str = None) -> list:
-    """本地 sentence-transformers 向量化"""
-    from sentence_transformers import SentenceTransformer
-
-    if "embed_model" not in st.session_state:
-        st.session_state.embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-    model_obj = st.session_state.embed_model
-    vectors = model_obj.encode(
-        chunks, show_progress_bar=False, batch_size=32,
-        normalize_embeddings=True,  # 返回已归一化向量，省去 FAISS normalize 步骤
-    )
-    return vectors.tolist()
+    """智谱 embedding-3 API 向量化 — batch 最多 32 条"""
+    client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=30)
+    vectors = []
+    batch_size = 32
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        resp = client.embeddings.create(model=embed_model or "embedding-3", input=batch)
+        for d in sorted(resp.data, key=lambda x: x.index):
+            vectors.append(d.embedding)
+    return vectors
 
 
-def embed_query(text: str) -> list:
-    """单条查询向量化（复用模型缓存）"""
-    return embed_chunks([text])[0]
+def embed_query(text: str, api_key: str = None, base_url: str = None, embed_model: str = None) -> list:
+    """单条查询向量化"""
+    return embed_chunks([text], api_key, base_url, embed_model)[0]
 
 
 # ═══════════════════════════════════════════════════════
@@ -239,7 +237,7 @@ class KnowledgeBase:
 
         # 必须有 api_key 才能重新向量化，否则只清索引（下次查询时报错提示）
         if api_key and chunks:
-            vectors = embed_chunks(chunks)
+            vectors = embed_chunks(chunks, api_key, base_url, embed_model)
             dim = len(vectors[0])
             index = faiss.IndexFlatIP(dim)
             arr = np.array(vectors, dtype="float32")
@@ -251,14 +249,14 @@ class KnowledgeBase:
         self._save_meta(meta)
         self._invalidate_cache()
 
-    def search(self, query: str, top_k: int = 5) -> list:
+    def search(self, query: str, api_key: str = None, base_url: str = None, embed_model: str = None, top_k: int = 5) -> list:
         meta = self._get_meta_cached()
         index = self._get_faiss()
         if not meta or index is None:
             return []
 
         import faiss, numpy as np
-        qv = embed_query(query)
+        qv = embed_query(query, api_key, base_url, embed_model)
         q_arr = np.array([qv], dtype="float32")
         faiss.normalize_L2(q_arr)
 
@@ -422,7 +420,7 @@ if stats["doc_count"] > 0:
                     placeholder = st.empty()
                     placeholder.markdown("🔍 检索中…")
 
-                    results = kb.search(prompt)
+                    results = kb.search(prompt, api_key, cfg["base_url"], cfg["embed_model"])
                     if results:
                         context_parts = []
                         sources = {}
