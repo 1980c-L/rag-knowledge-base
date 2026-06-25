@@ -266,38 +266,55 @@ class KnowledgeBase:
 
 
 # ═══════════════════════════════════════════════════════
-#  侧边栏
+#  侧边栏 — 仅供应商选择
 # ═══════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## 📚 知识库")
-
+    st.markdown("## ⚙️ 供应商")
     provider = st.selectbox("AI 供应商", list(PROVIDERS.keys()), index=0)
     cfg = PROVIDERS[provider]
     api_key = os.getenv(cfg["env_key"], "")
-
     if api_key:
         st.success(f"Key: {api_key[:8]}…{api_key[-4:]}")
     else:
         st.error(f"未配置 {cfg['env_key']}")
         st.stop()
 
-    st.divider()
-
     # 知识库选择
+    st.divider()
+    st.caption("知识库")
     existing = KnowledgeBase.list_all()
     kb_names = ["默认知识库"] + existing
-    kb_name = st.selectbox("选择知识库", kb_names, index=0)
+    kb_name = st.selectbox("选择", kb_names, index=0, label_visibility="collapsed")
     if kb_name == "默认知识库":
         kb_name = "default"
     kb = KnowledgeBase(kb_name)
 
-    if api_key:
+# ═══════════════════════════════════════════════════════
+#  主界面 — 双栏布局
+# ═══════════════════════════════════════════════════════
+st.markdown("<h1>📚 RAG 私有知识库</h1>", unsafe_allow_html=True)
+
+col_left, col_right = st.columns([0.35, 0.65], gap="medium")
+
+# ── 左栏：知识库管理 ──
+with col_left:
+    with st.container():
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+
+        st.markdown("### 📋 知识库管理")
+        stats = kb.stats()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("文档", stats["doc_count"])
+        with c2:
+            st.metric("片段", stats["chunk_count"])
+
         st.divider()
-        st.caption("📄 上传文档（PDF/TXT/MD/DOCX）")
+
+        st.caption("上传文档（PDF/TXT/MD/DOCX）")
         uploaded = st.file_uploader(
             "上传", type=["pdf", "txt", "md", "docx"],
-            accept_multiple_files=True,
-            key="file_upload",
+            accept_multiple_files=True, key="file_upload",
             label_visibility="collapsed",
         )
         if uploaded:
@@ -309,113 +326,109 @@ with st.sidebar:
                     total += n
                     bar.progress((i + 1) / len(uploaded))
                 bar.empty()
-            st.success(f"✅ 已添加 {len(uploaded)} 个文档，{total} 个片段")
+            st.success(f"✅ 已索引 {total} 个片段")
             st.rerun()
 
-    # 文档列表
-    docs = kb.list_docs()
-    if docs:
-        st.divider()
-        st.caption(f"📋 {len(docs)} 个文档 · {sum(d['chunks'] for d in docs)} 个片段")
-        for d in docs:
-            col1, col2 = st.columns([5, 1])
-            with col1:
-                st.caption(f"📄 {d['filename']} ({d['chunks']}块)")
-            with col2:
-                if st.button("🗑", key=f"del_{d['filename']}", help="删除"):
-                    kb.remove(d['filename'])
-                    st.rerun()
+        # 文档列表
+        docs = kb.list_docs()
+        if docs:
+            st.divider()
+            st.caption(f"已加载 {len(docs)} 个文档")
+            for d in docs:
+                col_a, col_b = st.columns([5, 1])
+                with col_a:
+                    st.caption(f"📄 {d['filename']} ({d['chunks']}块)")
+                with col_b:
+                    if st.button("🗑", key=f"del_{d['filename']}", help="删除"):
+                        kb.remove(d['filename'])
+                        st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ── 右栏：问答 ──
+with col_right:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 💬 知识库问答")
+
+    if stats["doc_count"] == 0:
+        st.info("👈 请先在左侧上传文档")
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.stop()
+
+    if "kb_messages" not in st.session_state:
+        st.session_state.kb_messages = []
+
+    # 消息区
+    chat_container = st.container()
+    with chat_container:
+        for msg in st.session_state.kb_messages:
+            with st.chat_message(msg["role"], avatar=msg["avatar"]):
+                st.markdown(msg["content"])
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════
-#  主界面
+#  对话输入（跨全宽）
 # ═══════════════════════════════════════════════════════
-st.markdown("<h1>📚 RAG 私有知识库</h1>", unsafe_allow_html=True)
+if stats["doc_count"] > 0:
+    if prompt := st.chat_input("向知识库提问…"):
+        st.session_state.kb_messages.append({
+            "role": "user", "content": prompt, "avatar": "👤",
+        })
 
-stats = kb.stats()
-col_a, col_b = st.columns(2)
-with col_a:
-    st.metric("文档数", stats["doc_count"])
-with col_b:
-    st.metric("向量片段", stats["chunk_count"])
+        # 用右栏显示回答
+        with col_right:
+            with st.container():
+                with st.chat_message("assistant", avatar="🤖"):
+                    placeholder = st.empty()
+                    placeholder.markdown("🔍 检索中…")
 
-if stats["doc_count"] == 0:
-    st.info("👈 左侧上传 PDF/TXT/DOCX 开始构建知识库")
-    st.stop()
+                    results = kb.search(prompt, api_key, cfg["base_url"], cfg["embed_model"])
+                    if results:
+                        context_parts = []
+                        sources = {}
+                        for r in results:
+                            fname = r["filename"]
+                            sources[fname] = sources.get(fname, 0) + 1
+                            context_parts.append(f"[{r['score']:.2f} | {fname}]\n{r['content'][:600]}")
+                        context = "\n\n---\n\n".join(context_parts)
+                        source_note = True
+                    else:
+                        context = "（知识库中未找到相关内容）"
+                        source_note = False
 
-# ═══════════════════════════════════════════════════════
-#  对话
-# ═══════════════════════════════════════════════════════
-if "kb_messages" not in st.session_state:
-    st.session_state.kb_messages = []
+                    full_response = ""
+                    try:
+                        client = openai.OpenAI(api_key=api_key, base_url=cfg["base_url"], timeout=30)
+                        stream = client.chat.completions.create(
+                            model=cfg["chat_model"],
+                            messages=[{
+                                "role": "system",
+                                "content": f"你是知识库助手。严格基于以下文档内容回答，引用时注明来源文件名。\n\n## 参考文档\n{context}",
+                            }, {
+                                "role": "user", "content": prompt,
+                            }],
+                            temperature=0.3, max_tokens=1024, stream=True,
+                        )
+                        for chunk in stream:
+                            c = chunk.choices[0].delta.content or ""
+                            if c:
+                                full_response += c
+                                placeholder.markdown(full_response)
+                    except Exception as e:
+                        full_response = f"⚠️ 生成失败：{e}"
 
-for msg in st.session_state.kb_messages:
-    with st.chat_message(msg["role"], avatar=msg["avatar"]):
-        st.markdown(msg["content"])
+                    if not full_response.strip():
+                        full_response = "未找到相关答案，请换个问法。"
 
-if prompt := st.chat_input("向知识库提问…"):
-    st.session_state.kb_messages.append({
-        "role": "user", "content": prompt, "avatar": "👤",
-    })
-    with st.chat_message("user", avatar="👤"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant", avatar="🤖"):
-        placeholder = st.empty()
-        placeholder.markdown("🔍 检索中…")
-
-        # 检索
-        results = kb.search(prompt, api_key, cfg["base_url"], cfg["embed_model"])
-        if results:
-            context_parts = []
-            sources = {}
-            for r in results:
-                fname = r["filename"]
-                if fname not in sources:
-                    sources[fname] = 0
-                sources[fname] += 1
-                context_parts.append(f"[{r['score']:.2f} | {fname}]\n{r['content'][:600]}")
-            context = "\n\n---\n\n".join(context_parts)
-            source_note = "\n\n---\n📎 **参考来源：** " + "、".join(
-                f"`{f}` ({c}处)" for f, c in sources.items()
-            )
-        else:
-            context = "（知识库中未找到相关内容）"
-            source_note = ""
-
-        # 生成回答
-        full_response = ""
-        try:
-            client = openai.OpenAI(api_key=api_key, base_url=cfg["base_url"], timeout=30)
-            stream = client.chat.completions.create(
-                model=cfg["chat_model"],
-                messages=[{
-                    "role": "system",
-                    "content": f"你是知识库助手。严格基于以下文档内容回答，引用时注明来源文件名。\n\n## 参考文档\n{context}",
-                }, {
-                    "role": "user", "content": prompt,
-                }],
-                temperature=0.3, max_tokens=1024, stream=True,
-            )
-            for chunk in stream:
-                c = chunk.choices[0].delta.content or ""
-                if c:
-                    full_response += c
                     placeholder.markdown(full_response)
-        except Exception as e:
-            full_response = f"⚠️ 生成失败：{e}"
 
-        if not full_response.strip():
-            full_response = "未找到相关答案，请换个问法。"
+                    if source_note:
+                        with st.expander("📎 参考来源", expanded=False):
+                            for fname, count in sources.items():
+                                st.caption(f"📄 {fname}（{count} 处引用）")
 
-        placeholder.markdown(full_response)
-
-        # 来源引用（可折叠）
-        if source_note:
-            with st.expander("📎 参考来源", expanded=False):
-                for fname, count in sources.items():
-                    st.caption(f"📄 {fname}（{count} 处引用）")
-
-    st.session_state.kb_messages.append({
-        "role": "assistant", "content": full_response, "avatar": "🤖",
-    })
-    st.rerun()
+        st.session_state.kb_messages.append({
+            "role": "assistant", "content": full_response, "avatar": "🤖",
+        })
+        st.rerun()
