@@ -74,9 +74,17 @@ st.markdown("""
         margin-bottom: 14px !important; background: #14142b !important;
         border: 1px solid #1e1e3a !important;
     }
+    /* 底部输入区整体容器 — 去掉纯黑，融入页面背景 */
+    [data-testid="stChatInput"], [data-testid="stBottomBlockContainer"] {
+        background: #0d0d20 !important;
+    }
     [data-testid="stChatInput"] textarea {
         border-radius: 14px !important; border: 1.5px solid #252545 !important;
         padding: 14px 18px !important; background: #12122b !important; color: #e8e8f0 !important;
+    }
+    /* 输入框聚焦时边框高亮 */
+    [data-testid="stChatInput"] textarea:focus {
+        border-color: #6366f1 !important; box-shadow: 0 0 0 1px #6366f140 !important;
     }
     [data-testid="stSidebar"] {
         background: linear-gradient(175deg, #0a0a18, #0f0f24) !important;
@@ -120,7 +128,7 @@ def chunk_text(text: str, size: int = 500, overlap: int = 80) -> list:
     return [c.strip() for c in splitter.split_text(text) if len(c.strip()) > 30]
 
 
-def embed_chunks(chunks: list) -> list:
+def embed_chunks(chunks: list, api_key: str = None, base_url: str = None, embed_model: str = None) -> list:
     """本地 sentence-transformers 向量化，无需 API"""
     from sentence_transformers import SentenceTransformer
 
@@ -162,7 +170,7 @@ class KnowledgeBase:
         st.session_state.pop(f"_faiss_{self.name}", None)
 
     def add(self, filename: str, file_bytes: bytes, api_key: str, base_url: str, embed_model: str):
-        import numpy as np
+        import numpy as np, faiss
         text = parse_document(file_bytes, filename)
         chunks = chunk_text(text)
         vectors = embed_chunks(chunks, api_key, base_url, embed_model)
@@ -173,7 +181,6 @@ class KnowledgeBase:
         if existing is not None:
             index = existing
         else:
-            import faiss
             index = faiss.IndexFlatIP(dim)
 
         arr = np.array(vectors, dtype="float32")
@@ -181,7 +188,6 @@ class KnowledgeBase:
         index.add(arr)
 
         # 持久化 FAISS
-        import faiss
         faiss.write_index(index, str(self.faiss_file))
         self._invalidate_faiss_cache()  # 刷新缓存
 
