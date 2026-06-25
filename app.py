@@ -179,29 +179,37 @@ class KnowledgeBase:
         return len(chunks)
 
     def remove(self, filename: str):
-        """按文件名删除文档"""
+        """按文件名删除文档 — 从 meta 移除 → 重建 FAISS"""
         meta = self._load_meta()
-        keep_ids = {m["id"] for m in meta if m["filename"] != filename}
+        removed = [m for m in meta if m["filename"] == filename]
+        if not removed:
+            return 0
+
         new_meta = [m for m in meta if m["filename"] != filename]
 
-        if len(new_meta) == len(meta):
-            return 0  # 没找到
-
-        # 重建 FAISS（FAISS 不支持删除，只能重建）
         if new_meta:
-            all_chunks = [m["content"] for m in new_meta]
-            # 重新向量化（这里可以优化，暂且接受）
-            self._rebuild_index(new_meta)
+            self._rebuild_index(new_meta, None, None, None)
         else:
             self.faiss_file.unlink(missing_ok=True)
             self._save_meta([])
-        return len(meta) - len(new_meta)
+        return len(removed)
 
-    def _rebuild_index(self, meta: list):
-        """重建 FAISS 索引（用于删除后）"""
+    def _rebuild_index(self, meta: list, api_key: str, base_url: str, embed_model: str):
+        """用 meta 中的 content 重新向量化 + 新建 FAISS 索引 → 写入磁盘"""
         import faiss, numpy as np
-        # 从 meta 重建 — 注意：删除后需要重新向量化，暂用空索引
-        # 实际场景保留向量在 meta 里，这里简化处理
+        chunks = [m["content"] for m in meta]
+
+        # 必须有 api_key 才能重新向量化，否则只清索引（下次查询时报错提示）
+        if api_key and chunks:
+            vectors = embed_chunks(chunks, api_key, base_url, embed_model)
+            dim = len(vectors[0])
+            index = faiss.IndexFlatIP(dim)
+            arr = np.array(vectors, dtype="float32")
+            faiss.normalize_L2(arr)
+            index.add(arr)
+            faiss.write_index(index, str(self.faiss_file))
+        elif not chunks:
+            self.faiss_file.unlink(missing_ok=True)
         self._save_meta(meta)
 
     def search(self, query: str, api_key: str, base_url: str, embed_model: str, top_k: int = 5) -> list:
@@ -399,10 +407,13 @@ if prompt := st.chat_input("向知识库提问…"):
         if not full_response.strip():
             full_response = "未找到相关答案，请换个问法。"
 
-        # 追加来源引用
-        if source_note:
-            full_response += source_note
         placeholder.markdown(full_response)
+
+        # 来源引用（可折叠）
+        if source_note:
+            with st.expander("📎 参考来源", expanded=False):
+                for fname, count in sources.items():
+                    st.caption(f"📄 {fname}（{count} 处引用）")
 
     st.session_state.kb_messages.append({
         "role": "assistant", "content": full_response, "avatar": "🤖",
